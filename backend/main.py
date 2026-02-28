@@ -3,6 +3,7 @@ import numpy as np
 import easyocr
 import re
 import logging
+import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
@@ -11,6 +12,9 @@ from typing import List, Dict
 # --- SETUP ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Force CPU usage to prevent DLL/GPU errors seen on some Windows machines
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 app = FastAPI(title="Smart-Nagorik NID Gateway")
 
@@ -21,7 +25,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-reader = easyocr.Reader(['bn', 'en'], gpu=False)
+# Initialize OCR (Bangla + English) - gpu=False is critical here
+try:
+    reader = easyocr.Reader(['bn', 'en'], gpu=False)
+except Exception as e:
+    logger.error(f"OCR Init Error: {e}")
+
+# --- LOGIC & FORM FILLING ENGINE ---
 
 def calculate_age(dob_str: str) -> int:
     try:
@@ -42,8 +52,12 @@ def get_eligible_services(age: int) -> List[str]:
 
 def parse_nid_data(text_list: List[str]) -> Dict:
     full_text = " ".join(text_list)
+    
+    # NID Number (10-17 digits)
     nid_match = re.search(r'\d{10,17}', full_text)
     nid_no = nid_match.group(0) if nid_match else "Not Found"
+
+    # DOB (Example: 01 Jan 1990)
     dob_match = re.search(r'\d{2} [A-Za-z]{3} \d{4}', full_text)
     dob = dob_match.group(0) if dob_match else "Not Found"
 
@@ -74,9 +88,14 @@ async def extract_nid(file: UploadFile = File(...)):
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        # Step 1: Raw OCR Extraction
         raw_results = reader.readtext(img, detail=0)
-        final_form_data = parse_nid_data(raw_results)
-        return {"status": "success", "data": final_form_data}
+
+        # Step 2: Logic Parsing
+        final_data = parse_nid_data(raw_results)
+
+        return {"status": "success", "data": final_data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
