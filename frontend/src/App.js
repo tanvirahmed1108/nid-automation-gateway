@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import './app.css';
+import './App.css';
 
 function App() {
   const [file, setFile] = useState(null);
@@ -67,12 +67,4 @@ function App() {
   );
 }
 
-import { render, screen } from '@testing-library/react';
-import App from './App';
-
-test('renders learn react link', () => {
-  render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
-});
 export default App;
