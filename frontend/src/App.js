@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import axios from 'axios';
-import './App.css';
+import './app.css';
 
 function App() {
   const [file, setFile] = useState(null);
