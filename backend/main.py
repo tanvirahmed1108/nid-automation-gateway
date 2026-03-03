@@ -1,25 +1,27 @@
-
-
+import os
+import json
 import cv2
 import numpy as np
 import easyocr
 import re
 import logging
-import os
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Dict
 
-# --- SETUP ---
+# --- 1. HARDWARE STABILITY FIX ---
+# This fixes the [WinError 1114] DLL error seen in your screenshot
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1" 
+
+# --- 2. INITIALIZATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Force CPU usage to prevent DLL/GPU errors seen on some Windows machines
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+app = FastAPI(title="Smart-Nagorik Gateway API")
 
-app = FastAPI(title="Smart-Nagorik NID Gateway")
-
+# Enable CORS so React can talk to Python
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,14 +29,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize OCR (Bangla + English) - gpu=False is critical here
+# Initialize OCR in CPU mode to prevent crashes
 try:
     reader = easyocr.Reader(['bn', 'en'], gpu=False)
+    logger.info("OCR Engine loaded successfully.")
 except Exception as e:
     logger.error(f"OCR Init Error: {e}")
 
-# --- LOGIC & FORM FILLING ENGINE ---
+# --- 3. DATABASE LOGIC (JSON) ---
+USER_DB = "users.json"
 
+class User(BaseModel):
+    username: str
+    password: str
+
+def load_users():
+    if not os.path.exists(USER_DB): return {}
+    with open(USER_DB, "r") as f:
+        return json.load(f)
+
+def save_user(username, password):
+    users = load_users()
+    users[username] = password
+    with open(USER_DB, "w") as f:
+        json.dump(users, f)
+
+# --- 4. AUTH ENDPOINTS ---
+# These fix the "Not Found" error in your registration screenshot
+@app.post("/register")
+async def register(user: User):
+    users = load_users()
+    if user.username in users:
+        raise HTTPException(status_code=400, detail="User already exists")
+    save_user(user.username, user.password)
+    return {"message": "User registered successfully"}
+
+@app.post("/login")
+async def login(user: User):
+    users = load_users()
+    if users.get(user.username) == user.password:
+        return {"status": "success", "username": user.username}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+# --- 5. NID PROCESSING LOGIC ---
 def calculate_age(dob_str: str) -> int:
     try:
         dob = datetime.strptime(dob_str, "%d %b %Y")
@@ -54,16 +91,11 @@ def get_eligible_services(age: int) -> List[str]:
 
 def parse_nid_data(text_list: List[str]) -> Dict:
     full_text = " ".join(text_list)
-    
-    # NID Number (10-17 digits)
     nid_match = re.search(r'\d{10,17}', full_text)
     nid_no = nid_match.group(0) if nid_match else "Not Found"
-
-    # DOB (Example: 01 Jan 1990)
     dob_match = re.search(r'\d{2} [A-Za-z]{3} \d{4}', full_text)
     dob = dob_match.group(0) if dob_match else "Not Found"
 
-    # Smarter Name Extraction
     name = "Not Found"
     for i, line in enumerate(text_list):
         if any(key in line for key in ["Name", "নাম"]):
@@ -76,13 +108,7 @@ def parse_nid_data(text_list: List[str]) -> Dict:
     
     age = calculate_age(dob)
     benefits = get_eligible_services(age)
-
-    return {
-        "name": name,
-        "nid_number": nid_no,
-        "dob": dob,
-        "eligible_benefits": benefits
-    }
+    return {"name": name, "nid_number": nid_no, "dob": dob, "eligible_benefits": benefits}
 
 @app.post("/extract-nid")
 async def extract_nid(file: UploadFile = File(...)):
@@ -90,13 +116,8 @@ async def extract_nid(file: UploadFile = File(...)):
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        # Step 1: Raw OCR Extraction
         raw_results = reader.readtext(img, detail=0)
-
-        # Step 2: Logic Parsing
         final_data = parse_nid_data(raw_results)
-
         return {"status": "success", "data": final_data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -104,38 +125,3 @@ async def extract_nid(file: UploadFile = File(...)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-    import json
-from pydantic import BaseModel
-
-# --- USER DATABASE LOGIC ---
-USER_DB = "users.json"
-
-class User(BaseModel):
-    username: str
-    password: str
-
-def load_users():
-    if not os.path.exists(USER_DB): return {}
-    with open(USER_DB, "r") as f: return json.load(f)
-
-def save_user(username, password):
-    users = load_users()
-    users[username] = password
-    with open(USER_DB, "w") as f: json.dump(users, f)
-
-# --- NEW API ENDPOINTS ---
-@app.post("/register")
-async def register(user: User):
-    users = load_users()
-    if user.username in users:
-        raise HTTPException(status_code=400, detail="User already exists")
-    save_user(user.username, user.password)
-    return {"message": "User registered successfully"}
-
-@app.post("/login")
-async def login(user: User):
-    users = load_users()
-    if users.get(user.username) == user.password:
-        return {"status": "success", "username": user.username}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
