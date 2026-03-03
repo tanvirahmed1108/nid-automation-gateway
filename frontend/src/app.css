@@ -12,3 +12,14 @@
 .benefits-box { margin-top: 2rem; padding: 15px; background: #e6f4ea; border-radius: 8px; border-left: 6px solid #006a4e; }
 .benefits-box h4 { margin-top: 0; color: #004d38; }
 .benefits-box p { margin: 5px 0; font-weight: 500; color: #2d5a27; }
+.auth-container {
+  width: 300px;
+  margin: 100px auto;
+  padding: 2rem;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+  text-align: center;
+}
+.auth-container input { width: 100%; padding: 10px; margin: 10px 0; }
+.auth-container p { cursor: pointer; color: #006a4e; text-decoration: underline; }
