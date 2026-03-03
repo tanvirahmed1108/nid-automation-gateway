@@ -1,3 +1,38 @@
+import json
+from pydantic import BaseModel
+
+# --- USER DATABASE LOGIC ---
+USER_DB = "users.json"
+
+class User(BaseModel):
+    username: str
+    password: str
+
+def load_users():
+    if not os.path.exists(USER_DB): return {}
+    with open(USER_DB, "r") as f: return json.load(f)
+
+def save_user(username, password):
+    users = load_users()
+    users[username] = password
+    with open(USER_DB, "w") as f: json.dump(users, f)
+
+# --- NEW API ENDPOINTS ---
+@app.post("/register")
+async def register(user: User):
+    users = load_users()
+    if user.username in users:
+        raise HTTPException(status_code=400, detail="User already exists")
+    save_user(user.username, user.password)
+    return {"message": "User registered successfully"}
+
+@app.post("/login")
+async def login(user: User):
+    users = load_users()
+    if users.get(user.username) == user.password:
+        return {"status": "success", "username": user.username}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
 import cv2
 import numpy as np
 import easyocr
