@@ -17,7 +17,8 @@ from fpdf import FPDF
 # --- MODULE 1: SYSTEM INITIALIZATION ---
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1" 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(_name_)
+# FIXED: Added double underscores
+logger = logging.getLogger(__name__) 
 
 app = FastAPI(title="Smart-Nagorik Gateway: Complete 5-Module API")
 
@@ -72,6 +73,7 @@ async def login(user: User):
 # --- MODULE 3 & 4: OCR & DATA PROCESSING ---
 def calculate_age(dob_str: str) -> int:
     try:
+        # Expected NID format: "01 Jan 1990"
         dob = datetime.strptime(dob_str, "%d %b %Y")
         today = datetime.today()
         return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
@@ -122,7 +124,7 @@ async def extract_nid(username: str, file: UploadFile = File(...)):
         raw_text = reader.readtext(img, detail=0)
         result = parse_nid_data(raw_text)
         
-        # Save History
+        # Save History to DB
         history = load_db(HISTORY_DB)
         if username not in history: history[username] = []
         history[username].append(result)
@@ -156,7 +158,7 @@ async def get_analytics():
             stats["service_demand"][b] = stats["service_demand"].get(b, 0) + 1
     return stats
 
-# --- PDF GENERATION (500 ERROR FIXED) ---
+# --- PDF GENERATION (FIXED) ---
 @app.post("/generate-report")
 async def generate_report(data: Dict):
     try:
@@ -165,25 +167,30 @@ async def generate_report(data: Dict):
         pdf.set_font("Arial", 'B', 16)
         pdf.cell(0, 10, txt="Smart-Nagorik Official Citizen Report", ln=True, align='C')
         pdf.ln(10)
+        
         pdf.set_font("Arial", size=12)
         pdf.cell(0, 10, txt=f"Full Name: {data.get('name')}", ln=True)
         pdf.cell(0, 10, txt=f"NID Number: {data.get('nid_number')}", ln=True)
         pdf.cell(0, 10, txt=f"Date of Birth: {data.get('dob')}", ln=True)
         pdf.ln(5)
+        
         pdf.set_font("Arial", 'B', 12)
         pdf.cell(0, 10, txt="Eligible Benefits & Services:", ln=True)
         pdf.set_font("Arial", size=11)
+        
         for b in data.get('benefits', []):
-            # Bangla text filter to prevent Latin-1 crash
+            # FIXED: Stripping Bangla for FPDF compatibility
             clean_b = b.split('(')[0].strip() 
             pdf.cell(0, 8, txt=f"- {clean_b}", ln=True)
 
+        # FIXED: Stream output with proper encoding
         pdf_bytes = pdf.output(dest='S').encode('latin-1', 'replace')
         return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf")
     except Exception as e:
         logger.error(f"PDF Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-if _name_ == "_main_":
+# FIXED: Correct main check
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
