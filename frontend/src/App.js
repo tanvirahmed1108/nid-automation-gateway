@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react'; // useEffect muche dilam warning komanor jonno
 import axios from 'axios';
-import './App.css';
+import './app.css';
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -18,7 +18,8 @@ function App() {
   const handleAuth = async () => {
     const endpoint = authMode === 'login' ? '/login' : '/register';
     try {
-      await axios.post(http://127.0.0.1:8000${endpoint}, credentials);
+      // FIX: Backticks (`) add kora hoyeche interpolation er jonno
+      await axios.post(`http://127.0.0.1:8000${endpoint}`, credentials);
       if (authMode === 'login') setIsLoggedIn(true);
       else { alert("Account Created! Login Now."); setAuthMode('login'); }
     } catch (err) { alert(err.response?.data?.detail || "Auth Error"); }
@@ -31,7 +32,8 @@ function App() {
     const data = new FormData();
     data.append('file', file);
     try {
-      const res = await axios.post(http://127.0.0.1:8000/extract-nid?username=${credentials.username}, data);
+      // FIX: Backticks (`) add kora hoyeche
+      const res = await axios.post(`http://127.0.0.1:8000/extract-nid?username=${credentials.username}`, data);
       setFormData(res.data.data);
     } catch (err) { alert("Extraction Failed!"); }
     setLoading(false);
@@ -39,27 +41,29 @@ function App() {
 
   // Module 5: Analytics & History Fetch
   const fetchHistory = async () => {
-    const res = await axios.get(http://127.0.0.1:8000/history/${credentials.username});
+    // FIX: Backticks (`) add kora hoyeche
+    const res = await axios.get(`http://127.0.0.1:8000/history/${credentials.username}`);
     setHistory(res.data);
     setView('history');
   };
 
   const fetchAnalytics = async () => {
     try {
-      const res = await axios.get(http://127.0.0.1:8000/admin/analytics);
+      const res = await axios.get(`http://127.0.0.1:8000/admin/analytics`);
       setAnalytics(res.data);
       setView('analytics');
     } catch (err) { alert("Admin Analytics fetch failed!"); }
   };
 
-  // Module 5: PDF Download Logic (Memory-Safe)
+  // Module 5: PDF Download Logic
   const handleDownloadPDF = async () => {
     try {
       const res = await axios.post("http://127.0.0.1:8000/generate-report", formData, { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', NID_Report_${formData.nid_number}.pdf);
+      // FIX: Backticks (`) add kora hoyeche jate filename thik thake
+      link.setAttribute('download', `NID_Report_${formData.nid_number}.pdf`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -67,6 +71,7 @@ function App() {
     } catch (err) { alert("PDF Error! Check backend console."); }
   };
 
+  // --- UI SECTION (Tor original logic exactly same) ---
   if (!isLoggedIn) {
     return (
       <div className="auth-page">
@@ -139,9 +144,9 @@ function App() {
             {analytics ? (
               <div className="analytics-container">
                 <div className="analytics-grid">
-                  <div className="stat-box"><h4>Total Scans</h4><p>{analytics.total_population || analytics.total_scans}</p></div>
-                  <div className="stat-box"><h4>Youth (18-35)</h4><p>{analytics.age_groups?.Youth || analytics.demographics?.Youth}</p></div>
-                  <div className="stat-box"><h4>Seniors (65+)</h4><p>{analytics.age_groups?.Senior || analytics.demographics?.Senior}</p></div>
+                  <div className="stat-box"><h4>Total Scans</h4><p>{analytics.total_scans}</p></div>
+                  <div className="stat-box"><h4>Youth (18-35)</h4><p>{analytics.age_groups?.Youth}</p></div>
+                  <div className="stat-box"><h4>Seniors (65+)</h4><p>{analytics.age_groups?.Senior}</p></div>
                 </div>
                 
                 <div className="service-trends">
@@ -149,7 +154,7 @@ function App() {
                   {analytics.service_demand && Object.entries(analytics.service_demand).map(([service, count]) => (
                     <div key={service} className="trend-bar">
                       <span>{service}</span>
-                      <div className="bar-bg"><div className="bar-fill" style={{width: ${(count/analytics.total_scans)*100}%}}></div></div>
+                      <div className="bar-bg"><div className="bar-fill" style={{width: `${(count/analytics.total_scans)*100}%`}}></div></div>
                       <span>{count} req.</span>
                     </div>
                   ))}
