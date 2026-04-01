@@ -5,7 +5,7 @@ import numpy as np
 import easyocr
 import re
 import logging
-import io  # CRITICAL for fixing 500 Internal Server Error
+import io
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -14,14 +14,13 @@ from datetime import datetime
 from typing import List, Dict
 from fpdf import FPDF
 
-# --- 1. HARDWARE STABILITY FIX ---
+# --- MODULE 1: SYSTEM INITIALIZATION ---
+# Windows DLL/Hardware stability fix
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1" 
-
-# --- 2. INITIALIZATION ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Smart-Nagorik Gateway API")
+app = FastAPI(title="Smart-Nagorik Gateway: Complete 5-Module API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,57 +29,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize OCR
+# Initialize OCR Engine (CPU Mode)
 try:
     reader = easyocr.Reader(['bn', 'en'], gpu=False)
     logger.info("OCR Engine loaded successfully.")
 except Exception as e:
     logger.error(f"OCR Init Error: {e}")
 
-# --- 3. DATABASE LOGIC ---
 USER_DB = "users.json"
 HISTORY_DB = "history.json"
 
+# --- HELPER FUNCTIONS ---
+def load_db(path):
+    if not os.path.exists(path): return {}
+    with open(path, "r", encoding='utf-8') as f:
+        return json.load(f)
+
+def save_db(path, data):
+    with open(path, "w", encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+# --- MODULE 2: AUTHENTICATION (Login/Register) ---
 class User(BaseModel):
     username: str
     password: str
 
-def load_data(file_path):
-    if not os.path.exists(file_path): return {}
-    with open(file_path, "r", encoding='utf-8') as f: return json.load(f)
-
-def save_data(file_path, data):
-    with open(file_path, "w", encoding='utf-8') as f: json.dump(data, f, indent=4)
-
-# --- 4. AUTH ENDPOINTS ---
 @app.post("/register")
 async def register(user: User):
-    users = load_data(USER_DB)
-    if user.username in users:
+    db = load_db(USER_DB)
+    if user.username in db:
         raise HTTPException(status_code=400, detail="User already exists")
-    users[user.username] = user.password
-    save_data(USER_DB, users)
-    return {"message": "User registered successfully"}
+    db[user.username] = user.password
+    save_db(USER_DB, db)
+    return {"message": "Registration successful"}
 
 @app.post("/login")
 async def login(user: User):
-    users = load_data(USER_DB)
-    if users.get(user.username) == user.password:
+    db = load_db(USER_DB)
+    if db.get(user.username) == user.password:
         return {"status": "success", "username": user.username}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# --- 5. NID PROCESSING LOGIC ---
+# --- MODULE 3: INTELLIGENT OCR & MODULE 4: PROCESSING ---
 def calculate_age(dob_str: str) -> int:
     try:
+        # Expected format: "01 Jan 1990"
         dob = datetime.strptime(dob_str, "%d %b %Y")
         today = datetime.today()
         return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
     except:
         return None
 
-def get_eligible_services(age: int) -> List[str]:
-    if age is None: return ["Manual Age Verification Required"]
+def get_eligibility(age: int) -> List[str]:
     services = ["Smart ID Services", "Digital Banking Access"]
+    if age is None: return services
     if age >= 18: services.append("Voter Registration (ভোটার নিবন্ধন)")
     if 18 <= age <= 35: services.append("Youth Training Grant (যুব উন্নয়ন)")
     if age >= 65: services.append("Old Age Allowance (বয়স্ক ভাতা)")
@@ -89,12 +91,9 @@ def get_eligible_services(age: int) -> List[str]:
 def parse_nid_data(text_list: List[str]) -> Dict:
     full_text = " ".join(text_list)
     nid_match = re.search(r'\d{10,17}', full_text)
-    nid_no = nid_match.group(0) if nid_match else "Not Found"
-    
     dob_match = re.search(r'\d{2} [A-Za-z]{3} \d{4}', full_text)
-    dob = dob_match.group(0) if dob_match else "Not Found"
-
-    # Restored high-accuracy Name Detection
+    
+    # High-accuracy Name Detection (Restored)
     name = "Not Found"
     for i, line in enumerate(text_list):
         if any(key in line for key in ["Name", "নাম"]):
@@ -105,13 +104,14 @@ def parse_nid_data(text_list: List[str]) -> Dict:
                 name = text_list[i+1].strip()
                 break
     
+    dob = dob_match.group(0) if dob_match else "Not Found"
     age = calculate_age(dob)
-    benefits = get_eligible_services(age)
+    benefits = get_eligibility(age)
     
     return {
         "name": name, 
-        "nid_number": nid_no, 
-        "dob": dob, 
+        "nid_number": nid_match.group(0) if nid_match else "Not Found",
+        "dob": dob,
         "benefits": benefits,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -122,31 +122,61 @@ async def extract_nid(username: str, file: UploadFile = File(...)):
         contents = await file.read()
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        raw_results = reader.readtext(img, detail=0)
-        final_data = parse_nid_data(raw_results)
+        raw_text = reader.readtext(img, detail=0)
         
-        history = load_data(HISTORY_DB)
+        result = parse_nid_data(raw_text)
+        
+        # --- MODULE 4 (CONT): HISTORY MANAGEMENT ---
+        history = load_db(HISTORY_DB)
         if username not in history: history[username] = []
-        history[username].append(final_data)
-        save_data(HISTORY_DB, history)
+        history[username].append(result)
+        save_db(HISTORY_DB, history)
         
-        return {"status": "success", "data": final_data}
+        return {"status": "success", "data": result}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# --- 6. HISTORY & PDF LOGIC ---
 @app.get("/history/{username}")
 async def get_history(username: str):
-    history = load_data(HISTORY_DB)
-    return history.get(username, [])
+    return load_db(HISTORY_DB).get(username, [])
 
+# --- MODULE 5: DATA ANALYTICS (Admin Insight) ---
+@app.get("/admin/analytics")
+async def get_analytics():
+    history = load_db(HISTORY_DB)
+    all_scans = [item for sublist in history.values() for item in sublist]
+    
+    stats = {
+        "total_scans": len(all_scans),
+        "age_groups": {"Youth": 0, "Middle": 0, "Senior": 0},
+        "service_demand": {}
+    }
+    
+    for scan in all_scans:
+        # Age Trends
+        dob = scan.get("dob", "")
+        try:
+            year = int(dob.split()[-1])
+            age = datetime.today().year - year
+            if age <= 35: stats["age_groups"]["Youth"] += 1
+            elif age <= 64: stats["age_groups"]["Middle"] += 1
+            else: stats["age_groups"]["Senior"] += 1
+        except: pass
+        
+        # Service Trends
+        for b in scan.get("benefits", []):
+            stats["service_demand"][b] = stats["service_demand"].get(b, 0) + 1
+            
+    return stats
+
+# --- PDF GENERATION (Reporting Module with RAM Fix) ---
 @app.post("/generate-report")
 async def generate_report(data: Dict):
     try:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", 'B', 16)
-        pdf.cell(200, 10, txt="Smart-Nagorik Official NID Report", ln=True, align='C')
+        pdf.cell(200, 10, txt="Smart-Nagorik Official Citizen Report", ln=True, align='C')
         pdf.ln(10)
         
         pdf.set_font("Arial", size=12)
@@ -156,20 +186,15 @@ async def generate_report(data: Dict):
         pdf.ln(5)
         
         pdf.set_font("Arial", 'B', 12)
-        pdf.cell(200, 10, txt="Eligible Benefits:", ln=True)
+        pdf.cell(200, 10, txt="Eligible Benefits & Services:", ln=True)
         pdf.set_font("Arial", size=11)
-        for benefit in data.get('benefits', []):
-            pdf.cell(200, 8, txt=f"- {benefit}", ln=True)
+        for b in data.get('benefits', []):
+            pdf.cell(200, 8, txt=f"- {b}", ln=True)
 
-        # FIX: Send PDF from memory to avoid disk permission errors
-        pdf_output = pdf.output(dest='S').encode('latin-1')
-        return StreamingResponse(
-            io.BytesIO(pdf_output),
-            media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=NID_Report.pdf"}
-        )
+        # streaming fix: output to memory buffer
+        pdf_bin = pdf.output(dest='S').encode('latin-1')
+        return StreamingResponse(io.BytesIO(pdf_bin), media_type="application/pdf")
     except Exception as e:
-        logger.error(f"PDF Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
