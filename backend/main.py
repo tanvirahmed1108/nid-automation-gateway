@@ -15,10 +15,9 @@ from typing import List, Dict
 from fpdf import FPDF
 
 # --- MODULE 1: SYSTEM INITIALIZATION ---
-# Windows DLL/Hardware stability fix
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1" 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(_name_)
 
 app = FastAPI(title="Smart-Nagorik Gateway: Complete 5-Module API")
 
@@ -49,7 +48,7 @@ def save_db(path, data):
     with open(path, "w", encoding='utf-8') as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
 
-# --- MODULE 2: AUTHENTICATION (Login/Register) ---
+# --- MODULE 2: AUTHENTICATION ---
 class User(BaseModel):
     username: str
     password: str
@@ -70,10 +69,9 @@ async def login(user: User):
         return {"status": "success", "username": user.username}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# --- MODULE 3: INTELLIGENT OCR & MODULE 4: PROCESSING ---
+# --- MODULE 3 & 4: OCR & DATA PROCESSING ---
 def calculate_age(dob_str: str) -> int:
     try:
-        # Expected format: "01 Jan 1990"
         dob = datetime.strptime(dob_str, "%d %b %Y")
         today = datetime.today()
         return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
@@ -93,7 +91,6 @@ def parse_nid_data(text_list: List[str]) -> Dict:
     nid_match = re.search(r'\d{10,17}', full_text)
     dob_match = re.search(r'\d{2} [A-Za-z]{3} \d{4}', full_text)
     
-    # High-accuracy Name Detection (Restored)
     name = "Not Found"
     for i, line in enumerate(text_list):
         if any(key in line for key in ["Name", "নাম"]):
@@ -112,6 +109,7 @@ def parse_nid_data(text_list: List[str]) -> Dict:
         "name": name, 
         "nid_number": nid_match.group(0) if nid_match else "Not Found",
         "dob": dob,
+        "age": age,
         "benefits": benefits,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -120,13 +118,11 @@ def parse_nid_data(text_list: List[str]) -> Dict:
 async def extract_nid(username: str, file: UploadFile = File(...)):
     try:
         contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
         raw_text = reader.readtext(img, detail=0)
-        
         result = parse_nid_data(raw_text)
         
-        # --- MODULE 4 (CONT): HISTORY MANAGEMENT ---
+        # Save History
         history = load_db(HISTORY_DB)
         if username not in history: history[username] = []
         history[username].append(result)
@@ -140,63 +136,54 @@ async def extract_nid(username: str, file: UploadFile = File(...)):
 async def get_history(username: str):
     return load_db(HISTORY_DB).get(username, [])
 
-# --- MODULE 5: DATA ANALYTICS (Admin Insight) ---
+# --- MODULE 5: DATA ANALYTICS ---
 @app.get("/admin/analytics")
 async def get_analytics():
     history = load_db(HISTORY_DB)
     all_scans = [item for sublist in history.values() for item in sublist]
-    
     stats = {
         "total_scans": len(all_scans),
         "age_groups": {"Youth": 0, "Middle": 0, "Senior": 0},
         "service_demand": {}
     }
-    
     for scan in all_scans:
-        # Age Trends
-        dob = scan.get("dob", "")
-        try:
-            year = int(dob.split()[-1])
-            age = datetime.today().year - year
+        age = scan.get("age")
+        if age:
             if age <= 35: stats["age_groups"]["Youth"] += 1
             elif age <= 64: stats["age_groups"]["Middle"] += 1
             else: stats["age_groups"]["Senior"] += 1
-        except: pass
-        
-        # Service Trends
         for b in scan.get("benefits", []):
             stats["service_demand"][b] = stats["service_demand"].get(b, 0) + 1
-            
     return stats
 
-# --- PDF GENERATION (Reporting Module with RAM Fix) ---
+# --- PDF GENERATION (500 ERROR FIXED) ---
 @app.post("/generate-report")
 async def generate_report(data: Dict):
     try:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", 'B', 16)
-        pdf.cell(200, 10, txt="Smart-Nagorik Official Citizen Report", ln=True, align='C')
+        pdf.cell(0, 10, txt="Smart-Nagorik Official Citizen Report", ln=True, align='C')
         pdf.ln(10)
-        
         pdf.set_font("Arial", size=12)
-        pdf.cell(200, 10, txt=f"Full Name: {data.get('name')}", ln=True)
-        pdf.cell(200, 10, txt=f"NID Number: {data.get('nid_number')}", ln=True)
-        pdf.cell(200, 10, txt=f"Date of Birth: {data.get('dob')}", ln=True)
+        pdf.cell(0, 10, txt=f"Full Name: {data.get('name')}", ln=True)
+        pdf.cell(0, 10, txt=f"NID Number: {data.get('nid_number')}", ln=True)
+        pdf.cell(0, 10, txt=f"Date of Birth: {data.get('dob')}", ln=True)
         pdf.ln(5)
-        
         pdf.set_font("Arial", 'B', 12)
-        pdf.cell(200, 10, txt="Eligible Benefits & Services:", ln=True)
+        pdf.cell(0, 10, txt="Eligible Benefits & Services:", ln=True)
         pdf.set_font("Arial", size=11)
         for b in data.get('benefits', []):
-            pdf.cell(200, 8, txt=f"- {b}", ln=True)
+            # Bangla text filter to prevent Latin-1 crash
+            clean_b = b.split('(')[0].strip() 
+            pdf.cell(0, 8, txt=f"- {clean_b}", ln=True)
 
-        # streaming fix: output to memory buffer
-        pdf_bin = pdf.output(dest='S').encode('latin-1')
-        return StreamingResponse(io.BytesIO(pdf_bin), media_type="application/pdf")
+        pdf_bytes = pdf.output(dest='S').encode('latin-1', 'replace')
+        return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf")
     except Exception as e:
+        logger.error(f"PDF Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
