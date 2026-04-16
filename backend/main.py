@@ -12,7 +12,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Dict, Optional
-from fpdf import FPDF
+
+# ── ReportLab imports (replaces fpdf — full Unicode support) ──────────────────
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+)
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 logging.basicConfig(level=logging.INFO)
@@ -150,7 +159,6 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
     for i, l in enumerate(raw_lines):
         logger.info(f"  [{i:02d}] {repr(l)}")
 
-    # Pass 1: English-only filtered lines (used for DOB, Gender, BRN)
     english_lines = []
     for i, line in enumerate(raw_lines):
         c = strip_bengali(line).strip()
@@ -160,7 +168,6 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
     texts = [l for _, l in english_lines]
     full_text_eng = " ".join(texts)
 
-    # Pass 2: All lines with English content (used for Name, Mother, Father etc.)
     cleaned = []
     for line in raw_lines:
         c = strip_bengali(line).strip()
@@ -170,11 +177,6 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
             val_part = c[1:].strip()
             if re.search(r'[a-zA-Z0-9]', val_part):
                 cleaned.append(c)
-
-    logger.info("=== ENGLISH-ONLY LINES ===")
-    for i, l in enumerate(texts): logger.info(f"  [{i:02d}] {repr(l)}")
-    logger.info("=== CLEANED ALL LINES ===")
-    for i, l in enumerate(cleaned): logger.info(f"  [{i:02d}] {repr(l)}")
 
     # ── BRN ───────────────────────────────────────────────────────────────
     brn = "Not Found"
@@ -194,7 +196,6 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
     )
     dob = "Not Found"
 
-    # Pass 1: "Date of Birth" label + date on same line
     for line in raw_lines:
         lc = strip_bengali(line).strip()
         if not lc or SKIP_LINES.search(lc): continue
@@ -206,7 +207,6 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
                 dob = f"{dm.group(1).zfill(2)}/{dm.group(2).zfill(2)}/{dm.group(3)}"
                 break
 
-    # Pass 2: label on one line, date on next line
     if dob == "Not Found":
         for i, line in enumerate(raw_lines):
             lc = strip_bengali(line).strip()
@@ -221,7 +221,6 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
                         break
                 if dob != "Not Found": break
 
-    # Pass 3: last resort — any non-skip line with a plausible birth year
     if dob == "Not Found":
         for line in raw_lines:
             lc = strip_bengali(line).strip()
@@ -289,15 +288,11 @@ def parse_birth_cert_data(raw_lines: List[str]) -> Dict:
             nationality = first.upper()
 
     def _sanitize_field(s: str) -> str:
-        """Strip OCR special chars that break fpdf latin-1 encoding."""
         if not s or s == "Not Found":
             return s
-        # Replace common Unicode punctuation with ASCII equivalents
-        for ch, r in {'\u2013':'-','\u2014':'-','\u2018':"'",'\u2019':"'",'\u00a0':' ','\u200b':''}.items():
-            s = s.replace(ch, r)
-        s = re.sub(r'[\u0980-\u09FF]', '', s)  # Bengali
-        s = re.sub(r'[^\x00-\xFF]', '', s)      # anything above latin-1
-        return re.sub(r'\s+', ' ', s).strip() or "Not Found"
+        s = re.sub(r'[\u0980-\u09FF]', '', s)
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s or "Not Found"
 
     result = {
         "name":                 _sanitize_field(name),
@@ -385,109 +380,328 @@ async def get_analytics():
 
 
 # ══════════════════════════════════════════════════════
-#  PDF HELPERS
-#  Root cause of PDF failures:
-#  - fpdf's multi_cell() moves the cursor to the next line AND resets X to 0,
-#    so mixing cell() + multi_cell() on the same logical row corrupts layout.
-#  - set_y(-22) for the footer can overlap body text when content is long.
-#
-#  Fix:
-#  - Use only cell() for all rows (values are short enough after we removed
-#    the permanent address field).
-#  - Encode all strings to latin-1 (fpdf1 limitation) with error replacement.
-#  - Add a page break check before the footer so it never overlaps content.
-#  - Produce bytes with pdf.output(dest='S') which is reliable across
-#    fpdf versions, then encode to bytes consistently.
+#  PDF HELPERS — using ReportLab (full Unicode support)
+#  Replaces fpdf which had latin-1 encoding limitations.
 # ══════════════════════════════════════════════════════
 
-def _safe(value: str) -> str:
+def _safe_str(value) -> str:
     """
-    Make a string safe for fpdf1 (Arial/Helvetica = latin-1 subset).
-    Steps:
-      1. Replace common Unicode punctuation with ASCII equivalents.
-      2. Strip Bengali and other non-latin characters.
-      3. Encode to latin-1 with 'replace' as a final safety net.
+    Sanitize a value for safe use in PDF text.
+    - Removes Bengali/non-printable characters
+    - Strips problematic Unicode that OCR may inject
+    - Returns 'N/A' for None/empty values
     """
-    if not value:
-        return "Not Found"
-    # Common Unicode → ASCII replacements
+    if value is None:
+        return "N/A"
+    s = str(value)
+    # Remove Bengali script characters
+    s = re.sub(r'[\u0980-\u09FF]', '', s)
+    # Replace common problematic Unicode with ASCII equivalents
     replacements = {
-        '\u2013': '-',   # en-dash
-        '\u2014': '-',   # em-dash
-        '\u2018': "'",   # left single quote
-        '\u2019': "'",   # right single quote
-        '\u201c': '"',   # left double quote
-        '\u201d': '"',   # right double quote
-        '\u2026': '...', # ellipsis
-        '\u00b7': '.',   # middle dot
-        '\u2022': '*',   # bullet
-        '\u00a0': ' ',   # non-breaking space
-        '\u200b': '',    # zero-width space
+        '\u2013': '-', '\u2014': '-',
+        '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"',
+        '\u2026': '...', '\u00b7': '.',
+        '\u2022': '*',  '\u00a0': ' ',
+        '\u200b': '',   '\u200c': '',
+        '\u200d': '',   '\ufeff': '',
     }
     for ch, repl in replacements.items():
-        value = value.replace(ch, repl)
-    # Strip Bengali and any remaining non-latin-1 characters
-    value = re.sub(r'[\u0980-\u09FF]', '', value)   # Bengali block
-    value = re.sub(r'[^\x00-\xFF]', '', value)       # anything above latin-1
-    value = re.sub(r'\s+', ' ', value).strip()
-    # Final safety net encode/decode
-    return value.encode('latin-1', errors='replace').decode('latin-1') or "Not Found"
-
-def _pdf_header(pdf: FPDF, title: str, subtitle: str, r: int, g: int, b: int):
-    pdf.set_fill_color(r, g, b)
-    pdf.rect(0, 0, 210, 42, 'F')
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Arial", 'B', 17)
-    pdf.set_xy(0, 10)
-    pdf.cell(210, 10, txt=title, ln=True, align='C')
-    pdf.set_font("Arial", size=9)
-    pdf.cell(210, 6, txt=subtitle, ln=True, align='C')
-    pdf.set_text_color(30, 30, 30)
-    pdf.ln(14)
-
-def _pdf_timestamp(pdf: FPDF, ts: str):
-    pdf.set_font("Arial", 'I', 9)
-    pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 6, txt=f"Generated: {ts}", ln=True, align='R')
-    pdf.ln(5)
-
-def _pdf_section(pdf: FPDF, title: str, r: int, g: int, b: int):
-    pdf.set_fill_color(r, g, b)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.set_text_color(13, 71, 161)
-    pdf.cell(0, 10, txt=f"  {title}", ln=True, fill=True)
-    pdf.ln(4)
-
-def _pdf_row(pdf: FPDF, label: str, value: str):
-    """Single row: label cell + value cell, both on the same line."""
-    pdf.set_font("Arial", 'B', 10)
-    pdf.set_text_color(90, 90, 90)
-    pdf.cell(60, 9, txt=f"{label}:", ln=False)
-    pdf.set_font("Arial", size=10)
-    pdf.set_text_color(20, 20, 20)
-    pdf.cell(0, 9, txt=_safe(value), ln=True)
-
-def _pdf_footer(pdf: FPDF, line1: str, line2: str, r: int, g: int, b: int):
-    """Draw footer — ensure at least 25mm of space, else add a new page."""
-    if pdf.get_y() > 265:
-        pdf.add_page()
-    pdf.set_y(-22)
-    pdf.set_fill_color(r, g, b)
-    pdf.rect(0, pdf.get_y(), 210, 22, 'F')
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Arial", 'I', 8)
-    pdf.cell(0, 7, txt=line1, ln=True, align='C')
-    pdf.cell(0, 5, txt=line2, ln=True, align='C')
-
-def _pdf_to_bytes(pdf: FPDF) -> bytes:
-    """Reliably convert fpdf output to bytes."""
-    out = pdf.output(dest='S')
-    if isinstance(out, str):
-        return out.encode('latin-1', errors='replace')
-    return bytes(out)
+        s = s.replace(ch, repl)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s if s else "N/A"
 
 
-# ── NID PDF ───────────────────────────────────────────
+def _build_nid_pdf(data) -> bytes:
+    """Build NID report PDF bytes using ReportLab."""
+    buffer = io.BytesIO()
+
+    # Colours
+    GREEN_DARK  = colors.HexColor('#064e3b')
+    GREEN_MID   = colors.HexColor('#065f46')
+    GREEN_LIGHT = colors.HexColor('#d1fae5')
+    GREY_LIGHT  = colors.HexColor('#f9fafb')
+    GREY_TEXT   = colors.HexColor('#374151')
+    GREY_LABEL  = colors.HexColor('#6b7280')
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm,
+        topMargin=15*mm,   bottomMargin=20*mm,
+    )
+
+    styles = getSampleStyleSheet()
+    story  = []
+
+    # ── Header ────────────────────────────────────────
+    header_style = ParagraphStyle(
+        'Header',
+        parent=styles['Normal'],
+        fontSize=18, fontName='Helvetica-Bold',
+        textColor=colors.white, alignment=TA_CENTER,
+        spaceAfter=2,
+    )
+    sub_style = ParagraphStyle(
+        'Sub',
+        parent=styles['Normal'],
+        fontSize=9, fontName='Helvetica',
+        textColor=colors.white, alignment=TA_CENTER,
+    )
+
+    header_table = Table(
+        [[Paragraph('SMART-NAGORIK CITIZEN REPORT', header_style)],
+         [Paragraph('Bangladesh National ID Verification Gateway', sub_style)]],
+        colWidths=[170*mm],
+    )
+    header_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), GREEN_DARK),
+        ('TOPPADDING',    (0, 0), (-1, -1), 14),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 14),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+        ('ROUNDEDCORNERS', [6]),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 6*mm))
+
+    # Timestamp
+    ts_style = ParagraphStyle(
+        'TS', parent=styles['Normal'],
+        fontSize=8, fontName='Helvetica-Oblique',
+        textColor=GREY_LABEL, alignment=TA_RIGHT,
+    )
+    ts = _safe_str(data.timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    story.append(Paragraph(f'Generated: {ts}', ts_style))
+    story.append(Spacer(1, 4*mm))
+
+    # ── Section title helper ──────────────────────────
+    sec_style = ParagraphStyle(
+        'Sec', parent=styles['Normal'],
+        fontSize=11, fontName='Helvetica-Bold',
+        textColor=GREEN_MID, spaceBefore=4, spaceAfter=3,
+    )
+
+    # ── Row helper ────────────────────────────────────
+    label_style = ParagraphStyle(
+        'Label', parent=styles['Normal'],
+        fontSize=9, fontName='Helvetica-Bold',
+        textColor=GREY_LABEL,
+    )
+    value_style = ParagraphStyle(
+        'Value', parent=styles['Normal'],
+        fontSize=10, fontName='Helvetica',
+        textColor=GREY_TEXT,
+    )
+
+    def make_row(label, value):
+        return [Paragraph(label, label_style), Paragraph(_safe_str(value), value_style)]
+
+    # ── Citizen Information ───────────────────────────
+    story.append(Paragraph('CITIZEN INFORMATION', sec_style))
+    story.append(HRFlowable(width='100%', thickness=1, color=GREEN_LIGHT))
+    story.append(Spacer(1, 3*mm))
+
+    age_str = f'{data.age} years' if data.age else 'N/A'
+    info_data = [
+        make_row('Full Name',     data.name),
+        make_row('NID Number',    data.nid_number),
+        make_row('Date of Birth', data.dob),
+        make_row('Age',           age_str),
+    ]
+    info_table = Table(info_data, colWidths=[50*mm, 120*mm])
+    info_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), GREY_LIGHT),
+        ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, GREY_LIGHT]),
+        ('TOPPADDING',    (0, 0), (-1, -1), 7),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e5e7eb')),
+        ('ROUNDEDCORNERS', [4]),
+    ]))
+    story.append(info_table)
+    story.append(Spacer(1, 5*mm))
+
+    # ── Eligible Services ─────────────────────────────
+    if data.benefits:
+        story.append(Paragraph('ELIGIBLE SERVICES &amp; BENEFITS', sec_style))
+        story.append(HRFlowable(width='100%', thickness=1, color=GREEN_LIGHT))
+        story.append(Spacer(1, 3*mm))
+
+        benefit_style = ParagraphStyle(
+            'Benefit', parent=styles['Normal'],
+            fontSize=10, fontName='Helvetica',
+            textColor=GREEN_MID,
+        )
+        for b in data.benefits:
+            clean = re.sub(r'[^\x20-\x7E]', '', b).split('(')[0].strip()
+            if clean:
+                story.append(Paragraph(f'  \u2713  {clean}', benefit_style))
+                story.append(Spacer(1, 2*mm))
+
+    # ── Footer ────────────────────────────────────────
+    story.append(Spacer(1, 8*mm))
+    footer_table = Table(
+        [[Paragraph('Official document — Smart-Nagorik Gateway System', sub_style)],
+         [Paragraph('For verification contact the Bangladesh National ID Authority', sub_style)]],
+        colWidths=[170*mm],
+    )
+    footer_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), GREEN_DARK),
+        ('TOPPADDING',    (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+    ]))
+    story.append(footer_table)
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def _build_birth_cert_pdf(data) -> bytes:
+    """Build Birth Certificate report PDF bytes using ReportLab."""
+    buffer = io.BytesIO()
+
+    BLUE_DARK  = colors.HexColor('#1e3a8a')
+    BLUE_MID   = colors.HexColor('#1d4ed8')
+    BLUE_LIGHT = colors.HexColor('#dbeafe')
+    GREY_LIGHT = colors.HexColor('#f9fafb')
+    GREY_TEXT  = colors.HexColor('#374151')
+    GREY_LABEL = colors.HexColor('#6b7280')
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm,
+        topMargin=15*mm,   bottomMargin=20*mm,
+    )
+
+    styles = getSampleStyleSheet()
+    story  = []
+
+    header_style = ParagraphStyle(
+        'Header', parent=styles['Normal'],
+        fontSize=17, fontName='Helvetica-Bold',
+        textColor=colors.white, alignment=TA_CENTER,
+        spaceAfter=2,
+    )
+    sub_style = ParagraphStyle(
+        'Sub', parent=styles['Normal'],
+        fontSize=9, fontName='Helvetica',
+        textColor=colors.white, alignment=TA_CENTER,
+    )
+
+    header_table = Table(
+        [[Paragraph('BIRTH CERTIFICATE REPORT', header_style)],
+         [Paragraph("People's Republic of Bangladesh — Smart-Nagorik Gateway", sub_style)]],
+        colWidths=[170*mm],
+    )
+    header_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), BLUE_DARK),
+        ('TOPPADDING',    (0, 0), (-1, -1), 14),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 14),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 6*mm))
+
+    ts_style = ParagraphStyle(
+        'TS', parent=styles['Normal'],
+        fontSize=8, fontName='Helvetica-Oblique',
+        textColor=GREY_LABEL, alignment=TA_RIGHT,
+    )
+    ts = _safe_str(data.timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    story.append(Paragraph(f'Generated: {ts}', ts_style))
+    story.append(Spacer(1, 4*mm))
+
+    sec_style = ParagraphStyle(
+        'Sec', parent=styles['Normal'],
+        fontSize=11, fontName='Helvetica-Bold',
+        textColor=BLUE_MID, spaceBefore=4, spaceAfter=3,
+    )
+    label_style = ParagraphStyle(
+        'Label', parent=styles['Normal'],
+        fontSize=9, fontName='Helvetica-Bold',
+        textColor=GREY_LABEL,
+    )
+    value_style = ParagraphStyle(
+        'Value', parent=styles['Normal'],
+        fontSize=10, fontName='Helvetica',
+        textColor=GREY_TEXT,
+    )
+
+    def make_row(label, value):
+        return [Paragraph(label, label_style), Paragraph(_safe_str(value), value_style)]
+
+    def make_section_table(rows):
+        t = Table(rows, colWidths=[55*mm, 115*mm])
+        t.setStyle(TableStyle([
+            ('ROWBACKGROUNDS', (0, 0), (-1, -1), [colors.white, GREY_LIGHT]),
+            ('TOPPADDING',    (0, 0), (-1, -1), 7),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 7),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 8),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#e5e7eb')),
+        ]))
+        return t
+
+    # Registration Details
+    story.append(Paragraph('REGISTRATION DETAILS', sec_style))
+    story.append(HRFlowable(width='100%', thickness=1, color=BLUE_LIGHT))
+    story.append(Spacer(1, 3*mm))
+    story.append(make_section_table([
+        make_row('Birth Registration No.', data.personal_id_no),
+    ]))
+    story.append(Spacer(1, 5*mm))
+
+    # Personal Information
+    story.append(Paragraph('PERSONAL INFORMATION', sec_style))
+    story.append(HRFlowable(width='100%', thickness=1, color=BLUE_LIGHT))
+    story.append(Spacer(1, 3*mm))
+    age_str = f'{data.age} years' if data.age else 'N/A'
+    story.append(make_section_table([
+        make_row('Full Name',      data.name),
+        make_row('Date of Birth',  data.dob),
+        make_row('Age',            age_str),
+        make_row('Gender',         data.gender),
+        make_row('Nationality',    data.nationality),
+        make_row('Place of Birth', data.place_of_birth),
+    ]))
+    story.append(Spacer(1, 5*mm))
+
+    # Family Information
+    story.append(Paragraph('FAMILY INFORMATION', sec_style))
+    story.append(HRFlowable(width='100%', thickness=1, color=BLUE_LIGHT))
+    story.append(Spacer(1, 3*mm))
+    story.append(make_section_table([
+        make_row("Father's Name", data.father_name),
+        make_row("Mother's Name", data.mother_name),
+    ]))
+
+    # Footer
+    story.append(Spacer(1, 8*mm))
+    footer_table = Table(
+        [[Paragraph('Official document — Smart-Nagorik Gateway System', sub_style)],
+         [Paragraph('For verification contact the Bangladesh Birth & Death Registration Authority', sub_style)]],
+        colWidths=[170*mm],
+    )
+    footer_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), BLUE_DARK),
+        ('TOPPADDING',    (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('LEFTPADDING',   (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING',  (0, 0), (-1, -1), 10),
+    ]))
+    story.append(footer_table)
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+# ── NID PDF ENDPOINT ──────────────────────────────────
 class NIDReportData(BaseModel):
     name:       Optional[str]       = "Not Found"
     nid_number: Optional[str]       = "Not Found"
@@ -499,46 +713,19 @@ class NIDReportData(BaseModel):
 @app.post("/generate-report")
 async def generate_report(data: NIDReportData):
     try:
-        pdf = FPDF()
-        pdf.add_page()
-
-        _pdf_header(pdf, "SMART-NAGORIK CITIZEN REPORT",
-                    "Bangladesh National ID Verification Gateway",
-                    0, 106, 78)
-        _pdf_timestamp(pdf, data.timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-        _pdf_section(pdf, "CITIZEN INFORMATION", 235, 248, 242)
-        _pdf_row(pdf, "Full Name",     data.name)
-        _pdf_row(pdf, "NID Number",    data.nid_number)
-        _pdf_row(pdf, "Date of Birth", data.dob)
-        _pdf_row(pdf, "Age",           f"{data.age} years" if data.age else "N/A")
-        pdf.ln(8)
-
-        _pdf_section(pdf, "ELIGIBLE SERVICES & BENEFITS", 235, 248, 242)
-        for b in (data.benefits or []):
-            clean = re.sub(r'[^\x00-\x7F]+', '', b).split('(')[0].strip()
-            if clean:
-                pdf.set_font("Arial", size=10)
-                pdf.set_text_color(20, 20, 20)
-                pdf.cell(0, 8, txt=f"  * {clean}", ln=True)
-
-        _pdf_footer(pdf,
-                    "Official document — Smart-Nagorik Gateway System",
-                    "For verification contact the Bangladesh National ID Authority",
-                    0, 106, 78)
-
-        pdf_bytes = _pdf_to_bytes(pdf)
+        pdf_bytes = _build_nid_pdf(data)
+        filename  = f"NID_{_safe_str(data.nid_number)}.pdf"
         return StreamingResponse(
             io.BytesIO(pdf_bytes),
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="NID_{_safe(data.nid_number)}.pdf"'}
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as e:
         logger.error(f"NID PDF error: {e}", exc_info=True)
-        raise HTTPException(500, f"PDF failed: {str(e)}")
+        raise HTTPException(500, f"PDF generation failed: {str(e)}")
 
 
-# ── BIRTH CERT PDF ────────────────────────────────────
+# ── BIRTH CERT PDF ENDPOINT ───────────────────────────
 class BirthCertReportData(BaseModel):
     name:                 Optional[str] = "Not Found"
     father_name:          Optional[str] = "Not Found"
@@ -556,45 +743,16 @@ class BirthCertReportData(BaseModel):
 @app.post("/generate-birth-cert-report")
 async def generate_birth_cert_report(data: BirthCertReportData):
     try:
-        pdf = FPDF()
-        pdf.add_page()
-
-        _pdf_header(pdf, "BIRTH CERTIFICATE REPORT",
-                    "People's Republic of Bangladesh — Smart-Nagorik Gateway",
-                    13, 71, 161)
-        _pdf_timestamp(pdf, data.timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-
-        _pdf_section(pdf, "REGISTRATION DETAILS", 232, 240, 254)
-        _pdf_row(pdf, "Birth Registration No.", data.personal_id_no)
-        pdf.ln(6)
-
-        _pdf_section(pdf, "PERSONAL INFORMATION", 232, 240, 254)
-        _pdf_row(pdf, "Full Name",      data.name)
-        _pdf_row(pdf, "Date of Birth",  data.dob)
-        _pdf_row(pdf, "Age",            f"{data.age} years" if data.age else "N/A")
-        _pdf_row(pdf, "Gender",         data.gender)
-        _pdf_row(pdf, "Nationality",    data.nationality)
-        _pdf_row(pdf, "Place of Birth", data.place_of_birth)
-        pdf.ln(6)
-
-        _pdf_section(pdf, "FAMILY INFORMATION", 232, 240, 254)
-        _pdf_row(pdf, "Father's Name",  data.father_name)
-        _pdf_row(pdf, "Mother's Name",  data.mother_name)
-
-        _pdf_footer(pdf,
-                    "Official document — Smart-Nagorik Gateway System",
-                    "For verification contact the Bangladesh Birth & Death Registration Authority",
-                    13, 71, 161)
-
-        pdf_bytes = _pdf_to_bytes(pdf)
+        pdf_bytes = _build_birth_cert_pdf(data)
+        filename  = f"BirthCert_{_safe_str(data.personal_id_no)}.pdf"
         return StreamingResponse(
             io.BytesIO(pdf_bytes),
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="BirthCert_{_safe(data.personal_id_no)}.pdf"'}
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as e:
         logger.error(f"Birth cert PDF error: {e}", exc_info=True)
-        raise HTTPException(500, f"PDF failed: {str(e)}")
+        raise HTTPException(500, f"PDF generation failed: {str(e)}")
 
 
 if __name__ == "__main__":
