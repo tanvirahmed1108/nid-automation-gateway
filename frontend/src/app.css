@@ -622,6 +622,40 @@ body {
   font-size: 0.75rem;
   font-weight: 600;
 }
+/* Try Again Button Styling */
+.btn-try-again {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px;
+  margin-top: 10px;
+  background-color: #6c757d !important; /* Standard Gray color */
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.btn-try-again:hover {
+  background-color: #5a6268 !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+}
+
+.btn-try-again:active {
+  transform: translateY(0);
+}
+
+/* Optional: Icon animation on hover */
+.btn-try-again:hover span {
+  transform: rotate(-45deg);
+  transition: transform 0.3s ease;
+}
 
 /* ===== ANALYTICS ===== */
 .stats-row {

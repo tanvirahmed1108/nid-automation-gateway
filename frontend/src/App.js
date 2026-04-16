@@ -29,6 +29,14 @@ function App() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  // --- NEW FEATURE: TRY AGAIN / RESET SCAN ---
+  const handleTryAgain = () => {
+    setFile(null);
+    setPreview(null);
+    setFormData({ name: '', nid_number: '', dob: '', age: null, benefits: [], timestamp: '' });
+    showToast('Ready for next scan!');
+  };
+
   const handleAuth = async () => {
     if (!credentials.username || !credentials.password) return showToast('Enter username & password', 'error');
 
@@ -158,7 +166,6 @@ function App() {
     setAnalytics(null);
   };
 
-  // --- AUTH SCREEN ---
   if (!isLoggedIn) {
     return (
       <div className="auth-screen">
@@ -212,7 +219,6 @@ function App() {
     );
   }
 
-  // --- MAIN APP ---
   return (
     <div className="app-shell">
       {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
@@ -257,8 +263,6 @@ function App() {
       </aside>
 
       <main className="main-content">
-
-        {/* SCAN VIEW */}
         {view === 'scan' && (
           <div className="page-content">
             <div className="page-header">
@@ -312,6 +316,31 @@ function App() {
                     <><span>⚡</span> Extract NID Data</>
                   )}
                 </button>
+
+                {/* --- MAMA: EIKHANE BAM PASHE NIYE ASHALAM --- */}
+                {file && !loading && (
+                    <button 
+                      className="btn-try-again" 
+                      onClick={handleTryAgain}
+                      style={{ 
+                        backgroundColor: '#6c757d', 
+                        color: 'white', 
+                        padding: '12px', 
+                        borderRadius: '8px', 
+                        border: 'none', 
+                        cursor: 'pointer',
+                        fontWeight: 'bold',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '8px',
+                        marginTop: '10px',
+                        width: '100%'
+                      }}
+                    >
+                      🔄 Scan Another NID
+                    </button>
+                )}
               </div>
 
               <div className="panel">
@@ -355,21 +384,22 @@ function App() {
                   </div>
                 )}
 
-                {formData.name && formData.name !== 'Not Found' && (
-                  <button className="btn-pdf" onClick={handleDownloadPDF} disabled={pdfLoading}>
-                    {pdfLoading ? (
-                      <><span className="spinner"></span> Generating...</>
-                    ) : (
-                      <><span>📄</span> Download Official Report</>
-                    )}
-                  </button>
+                {formData.name && formData.name !== '' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '20px' }}>
+                    <button className="btn-pdf" onClick={handleDownloadPDF} disabled={pdfLoading}>
+                      {pdfLoading ? (
+                        <><span className="spinner"></span> Generating...</>
+                      ) : (
+                        <><span>📄</span> Download Official Report</>
+                      )}
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
           </div>
         )}
 
-        {/* HISTORY VIEW */}
         {view === 'history' && (
           <div className="page-content">
             <div className="page-header">
@@ -412,7 +442,6 @@ function App() {
           </div>
         )}
 
-        {/* ANALYTICS VIEW — admin only */}
         {view === 'analytics' && (
           <div className="page-content">
             {!isAdmin ? (
