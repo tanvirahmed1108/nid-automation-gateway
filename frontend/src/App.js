@@ -68,7 +68,6 @@ const PanelHeader = ({ step, title, badge, blue }) => (
   </div>
 );
 
-// ── Birth cert fields — permanent_address removed ─────
 const BC_FIELDS = [
   { key: 'personal_id_no', label: 'Birth Registration No.', mono: true  },
   { key: 'name',           label: 'Full Name',              mono: false },
@@ -88,6 +87,26 @@ const INITIAL_BC_DATA = {
   personal_id_no: '', gender: '', nationality: '',
   timestamp: ''
 };
+
+// ── Helper: check if a scan record is from today ──────────────────────────────
+function isToday(timestamp) {
+  if (!timestamp) return false;
+  const today = new Date().toISOString().slice(0, 10);
+  return timestamp.startsWith(today);
+}
+
+// ── Helper: check if a scan record counts as an NID scan ─────────────────────
+// Older records may have no `type` field but have `nid_number`
+function isNidScan(h) {
+  if (h.type === 'nid') return true;
+  if (!h.type && h.nid_number) return true;
+  return false;
+}
+
+// ── Helper: check if a scan record counts as a birth cert scan ───────────────
+function isBcScan(h) {
+  return h.type === 'birth_cert';
+}
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn]             = useState(false);
@@ -117,7 +136,9 @@ export default function App() {
   const [authLoading, setAuthLoading]           = useState(false);
   const [nidDragOver, setNidDragOver]           = useState(false);
   const [time, setTime]                         = useState(new Date());
-  const [todayStats, setTodayStats]             = useState({ total: 0, nid: 0, bc: 0 });
+
+  // ── Today's stats — computed fresh from history on every update ──────────
+  const [todayStats, setTodayStats] = useState({ total: 0, nid: 0, bc: 0 });
 
   useEffect(() => {
     const t = setInterval(() => setTime(new Date()), 1000);
@@ -129,18 +150,21 @@ export default function App() {
     setTimeout(() => setToast(null), 3500);
   };
 
+  // ── Fetch history AND recompute today's stats atomically ─────────────────
   const fetchTodayStats = async (username) => {
     try {
       const res = await axios.get(`${API}/history/${username}`);
       const all = res.data;
-      const today = new Date().toISOString().slice(0, 10);
-      const todayScans = all.filter(h => h.timestamp?.startsWith(today));
+      const todayScans = all.filter(h => isToday(h.timestamp));
       setTodayStats({
         total: todayScans.length,
-        nid:   todayScans.filter(h => h.type === 'nid' || !h.type).length,
-        bc:    todayScans.filter(h => h.type === 'birth_cert').length,
+        nid:   todayScans.filter(isNidScan).length,
+        bc:    todayScans.filter(isBcScan).length,
       });
-    } catch {}
+      return all; // return full history for callers that need it
+    } catch {
+      return [];
+    }
   };
 
   const handleAuth = async () => {
@@ -176,6 +200,8 @@ export default function App() {
     if (f?.type.startsWith('image/')) handleNidFile(f);
     else showToast('Please upload an image file', 'error');
   };
+
+  // ── NID Extract — refresh stats immediately after success ─────────────────
   const handleNidExtract = async () => {
     if (!nidFile) return showToast('Upload an NID image first', 'error');
     setNidLoading(true);
@@ -183,12 +209,14 @@ export default function App() {
     try {
       const res = await axios.post(`${API}/extract-nid?username=${credentials.username}`, fd);
       if (res.data.status === 'success') {
-        setNidData(res.data.data); showToast('NID extracted!');
-        fetchTodayStats(credentials.username);
+        setNidData(res.data.data);
+        showToast('NID extracted!');
+        await fetchTodayStats(credentials.username); // refresh stats right away
       } else showToast(res.data.message || 'Extraction failed', 'error');
     } catch { showToast('Extraction failed. Check backend.', 'error'); }
     setNidLoading(false);
   };
+
   const handleNidPDF = async () => {
     setNidPdfLoading(true);
     try {
@@ -206,6 +234,7 @@ export default function App() {
     } catch { showToast('PDF download failed', 'error'); }
     setNidPdfLoading(false);
   };
+
   const resetNid = () => {
     setNidFile(null); setNidPreview(null);
     setNidData({ name: '', nid_number: '', dob: '', age: null, benefits: [], timestamp: '' });
@@ -222,6 +251,8 @@ export default function App() {
     if (f?.type.startsWith('image/')) handleBcFile(f);
     else showToast('Please upload an image file', 'error');
   };
+
+  // ── Birth Cert Extract — refresh stats immediately after success ───────────
   const handleBcExtract = async () => {
     if (!bcFile) return showToast('Upload a birth certificate image first', 'error');
     setBcLoading(true);
@@ -229,12 +260,14 @@ export default function App() {
     try {
       const res = await axios.post(`${API}/extract-birth-cert?username=${credentials.username}`, fd);
       if (res.data.status === 'success') {
-        setBcData(res.data.data); showToast('Birth certificate extracted!');
-        fetchTodayStats(credentials.username);
+        setBcData(res.data.data);
+        showToast('Birth certificate extracted!');
+        await fetchTodayStats(credentials.username); // refresh stats right away
       } else showToast(res.data.message || 'Extraction failed', 'error');
     } catch { showToast('Extraction failed. Check backend.', 'error'); }
     setBcLoading(false);
   };
+
   const handleBcPDF = async () => {
     setBcPdfLoading(true);
     try {
@@ -252,21 +285,26 @@ export default function App() {
     } catch { showToast('PDF download failed', 'error'); }
     setBcPdfLoading(false);
   };
+
   const resetBc = () => { setBcFile(null); setBcPreview(null); setBcData(INITIAL_BC_DATA); showToast('Ready for next birth cert scan!'); };
   const updateBcField = (key, val) => setBcData(prev => ({ ...prev, [key]: val }));
 
+  // ── History fetch — also refreshes today's stats ──────────────────────────
   const fetchHistory = async () => {
     try {
-      const res = await axios.get(`${API}/history/${credentials.username}`);
-      setHistory(res.data); setView('history');
+      const all = await fetchTodayStats(credentials.username);
+      setHistory(all);
+      setView('history');
     } catch { showToast('Failed to load history', 'error'); }
   };
+
   const fetchAnalytics = async () => {
     setView('analytics'); setAnalyticsLoading(true);
     try { const res = await axios.get(`${API}/admin/analytics`); setAnalytics(res.data); }
     catch { showToast('Analytics failed', 'error'); }
     setAnalyticsLoading(false);
   };
+
   const handleLogout = () => {
     setIsLoggedIn(false); setIsAdmin(false); setAuthMode('login'); setView('scan');
     setNidData({ name: '', nid_number: '', dob: '', age: null, benefits: [], timestamp: '' });
@@ -379,8 +417,8 @@ export default function App() {
                   onMouseLeave={e=>e.currentTarget.style.background='rgba(255,255,255,0.07)'}>
                   <div className="flex items-center gap-1.5 mb-0.5">
                     <span className={`text-[8px] font-semibold px-1.5 py-0.5 rounded-full
-                      ${h.type==='birth_cert' ? 'bg-blue-500/30 text-blue-200' : 'bg-emerald-500/30 text-emerald-200'}`}>
-                      {h.type==='birth_cert' ? 'BC' : 'NID'}
+                      ${isBcScan(h) ? 'bg-blue-500/30 text-blue-200' : 'bg-emerald-500/30 text-emerald-200'}`}>
+                      {isBcScan(h) ? 'BC' : 'NID'}
                     </span>
                     <p className="text-emerald-100 text-[10px] font-medium truncate">{h.name}</p>
                   </div>
@@ -426,11 +464,12 @@ export default function App() {
         <div className="p-4 flex-1 flex flex-col gap-3">
 
           {view==='scan' && (<>
+            {/* ── Stat cards — values come from live todayStats state ── */}
             <div className="grid grid-cols-4 gap-2.5">
               <StatCard dark label="Today's Scans"  value={todayStats.total} sub="scans today" />
-              <StatCard label="NID Scans"            value={todayStats.nid}   sub="today" subColor="text-emerald-600" />
-              <StatCard label="Birth Cert Scans"     value={todayStats.bc}    sub="today" subColor="text-blue-600" />
-              <StatCard label="Avg Process Time"     value="2.4s"             sub="OCR + parse" />
+              <StatCard label="NID Scans"   value={todayStats.nid} sub="today" subColor="text-emerald-600" />
+              <StatCard label="Birth Cert Scans" value={todayStats.bc}  sub="today" subColor="text-blue-600" />
+              <StatCard label="Avg Process Time" value="~10s" sub="OCR + parse" />
             </div>
 
             <div className="flex gap-2">
@@ -631,8 +670,8 @@ export default function App() {
           {view==='history' && (<>
             <div className="grid grid-cols-4 gap-2.5">
               <StatCard dark label="Total Records"   value={history.length} sub="all time" />
-              <StatCard label="NID Scans"             value={history.filter(h=>h.type==='nid'||!h.type).length} sub="total" subColor="text-emerald-600" />
-              <StatCard label="Birth Cert Scans"      value={history.filter(h=>h.type==='birth_cert').length}   sub="total" subColor="text-blue-600" />
+              <StatCard label="NID Scans"             value={history.filter(isNidScan).length} sub="total" subColor="text-emerald-600" />
+              <StatCard label="Birth Cert Scans"      value={history.filter(isBcScan).length}  sub="total" subColor="text-blue-600" />
               <StatCard label="Success Rate"          value="94%" sub={`${Math.round(history.length*0.94)} / ${history.length}`} />
             </div>
             <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
@@ -647,8 +686,8 @@ export default function App() {
                       <div key={i} className="grid px-4 py-3 border-b border-gray-50 hover:bg-gray-50 transition-colors items-center last:border-0"
                         style={{ gridTemplateColumns:'0.5fr 1.2fr 1fr 1fr 0.5fr' }}>
                         <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full inline-block text-center
-                          ${h.type==='birth_cert' ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
-                          {h.type==='birth_cert' ? 'BC' : 'NID'}
+                          ${isBcScan(h) ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                          {isBcScan(h) ? 'BC' : 'NID'}
                         </span>
                         <span className="font-mono text-[9px] text-gray-400">{h.timestamp}</span>
                         <span className="text-xs font-semibold text-gray-700">{h.name}</span>
