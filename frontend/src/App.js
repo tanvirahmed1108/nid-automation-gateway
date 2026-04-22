@@ -88,15 +88,18 @@ const INITIAL_BC_DATA = {
   timestamp: ''
 };
 
-// ── Helper: check if a scan record is from today ──────────────────────────────
+// ── FIX 1: isToday uses LOCAL date, not UTC ───────────────────────────────────
+// Python's datetime.now() gives local time (Bangladesh = UTC+6).
+// JS's toISOString() gives UTC — these mismatch after 6 PM Bangladesh time.
+// Solution: build "today" string from local JS date parts instead.
 function isToday(timestamp) {
   if (!timestamp) return false;
-  const today = new Date().toISOString().slice(0, 10);
-  return timestamp.startsWith(today);
+  const now = new Date();
+  const localToday = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  return timestamp.startsWith(localToday);
 }
 
 // ── Helper: check if a scan record counts as an NID scan ─────────────────────
-// Older records may have no `type` field but have `nid_number`
 function isNidScan(h) {
   if (h.type === 'nid') return true;
   if (!h.type && h.nid_number) return true;
@@ -137,7 +140,7 @@ export default function App() {
   const [nidDragOver, setNidDragOver]           = useState(false);
   const [time, setTime]                         = useState(new Date());
 
-  // ── Today's stats — computed fresh from history on every update ──────────
+  // ── Today's stats — computed from history, updated optimistically on scan ──
   const [todayStats, setTodayStats] = useState({ total: 0, nid: 0, bc: 0 });
 
   useEffect(() => {
@@ -150,7 +153,7 @@ export default function App() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  // ── Fetch history AND recompute today's stats atomically ─────────────────
+  // ── FIX 3: No setTimeout delay — just call directly and catch errors ───────
   const fetchTodayStats = async (username) => {
     try {
       const res = await axios.get(`${API}/history/${username}`);
@@ -161,7 +164,7 @@ export default function App() {
         nid:   todayScans.filter(isNidScan).length,
         bc:    todayScans.filter(isBcScan).length,
       });
-      return all; // return full history for callers that need it
+      return all;
     } catch {
       return [];
     }
@@ -173,7 +176,8 @@ export default function App() {
       if (credentials.username === ADMIN_USERNAME && credentials.password === ADMIN_PASSWORD) {
         setIsAdmin(true); setIsLoggedIn(true);
         showToast('Welcome, Administrator!');
-        setTimeout(() => fetchTodayStats(credentials.username), 300);
+        // FIX 3: no setTimeout, call directly
+        fetchTodayStats(credentials.username).catch(() => {});
       } else showToast('Invalid admin credentials', 'error');
       return;
     }
@@ -183,7 +187,8 @@ export default function App() {
       if (authMode === 'login') {
         setIsAdmin(false); setIsLoggedIn(true);
         showToast(`Welcome, ${credentials.username}!`);
-        setTimeout(() => fetchTodayStats(credentials.username), 300);
+        // FIX 3: no setTimeout, call directly
+        fetchTodayStats(credentials.username).catch(() => {});
       } else { showToast('Account created! Please log in.'); setAuthMode('login'); }
     } catch (err) { showToast(err.response?.data?.detail || 'Auth failed', 'error'); }
     setAuthLoading(false);
@@ -201,7 +206,7 @@ export default function App() {
     else showToast('Please upload an image file', 'error');
   };
 
-  // ── NID Extract — refresh stats immediately after success ─────────────────
+  // ── NID Extract — FIX 2: optimistic increment + background server sync ─────
   const handleNidExtract = async () => {
     if (!nidFile) return showToast('Upload an NID image first', 'error');
     setNidLoading(true);
@@ -211,7 +216,10 @@ export default function App() {
       if (res.data.status === 'success') {
         setNidData(res.data.data);
         showToast('NID extracted!');
-        await fetchTodayStats(credentials.username); // refresh stats right away
+        // FIX 2: immediately increment counter so UI updates instantly,
+        // then sync with server to confirm accurate value
+        setTodayStats(prev => ({ total: prev.total + 1, nid: prev.nid + 1, bc: prev.bc }));
+        fetchTodayStats(credentials.username).catch(() => {});
       } else showToast(res.data.message || 'Extraction failed', 'error');
     } catch { showToast('Extraction failed. Check backend.', 'error'); }
     setNidLoading(false);
@@ -252,7 +260,7 @@ export default function App() {
     else showToast('Please upload an image file', 'error');
   };
 
-  // ── Birth Cert Extract — refresh stats immediately after success ───────────
+  // ── Birth Cert Extract — FIX 2: optimistic increment + background sync ──────
   const handleBcExtract = async () => {
     if (!bcFile) return showToast('Upload a birth certificate image first', 'error');
     setBcLoading(true);
@@ -262,7 +270,10 @@ export default function App() {
       if (res.data.status === 'success') {
         setBcData(res.data.data);
         showToast('Birth certificate extracted!');
-        await fetchTodayStats(credentials.username); // refresh stats right away
+        // FIX 2: immediately increment counter so UI updates instantly,
+        // then sync with server to confirm accurate value
+        setTodayStats(prev => ({ total: prev.total + 1, nid: prev.nid, bc: prev.bc + 1 }));
+        fetchTodayStats(credentials.username).catch(() => {});
       } else showToast(res.data.message || 'Extraction failed', 'error');
     } catch { showToast('Extraction failed. Check backend.', 'error'); }
     setBcLoading(false);
@@ -464,12 +475,12 @@ export default function App() {
         <div className="p-4 flex-1 flex flex-col gap-3">
 
           {view==='scan' && (<>
-            {/* ── Stat cards — values come from live todayStats state ── */}
+            {/* ── Stat cards — todayStats updates instantly on scan ── */}
             <div className="grid grid-cols-4 gap-2.5">
-              <StatCard dark label="Today's Scans"  value={todayStats.total} sub="scans today" />
-              <StatCard label="NID Scans"   value={todayStats.nid} sub="today" subColor="text-emerald-600" />
-              <StatCard label="Birth Cert Scans" value={todayStats.bc}  sub="today" subColor="text-blue-600" />
-              <StatCard label="Avg Process Time" value="~10s" sub="OCR + parse" />
+              <StatCard dark label="Today's Scans"     value={todayStats.total} sub="scans today" />
+              <StatCard label="NID Scans"              value={todayStats.nid}   sub="today" subColor="text-emerald-600" />
+              <StatCard label="Birth Cert Scans"       value={todayStats.bc}    sub="today" subColor="text-blue-600" />
+              <StatCard label="Avg Process Time"       value="~10s"             sub="OCR + parse" />
             </div>
 
             <div className="flex gap-2">
